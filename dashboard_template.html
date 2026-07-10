@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DealFlow — Bristol County Pipeline</title>
+<style>
+  :root{
+    --paper:#101613; --panel:#17201b; --rule:#2a3a30;
+    --ink:#d9e6dd; --dim:#7c8f83; --ledger:#4fd18b; --flag:#e8b34b; --dead:#c65b4e;
+    --mono:"SF Mono",ui-monospace,Menlo,monospace;
+  }
+  *{box-sizing:border-box;margin:0}
+  body{background:var(--paper);color:var(--ink);font-family:var(--mono);font-size:14px;padding:20px 16px 60px}
+  header{border-bottom:3px double var(--rule);padding-bottom:14px;margin-bottom:18px}
+  h1{font-size:17px;letter-spacing:.14em;font-weight:600}
+  h1 span{color:var(--ledger)}
+  .sub{color:var(--dim);font-size:11px;letter-spacing:.08em;margin-top:4px;text-transform:uppercase}
+  .rail{display:flex;gap:6px;flex-wrap:wrap;margin:16px 0 22px}
+  .stage{flex:1;min-width:96px;background:var(--panel);border:1px solid var(--rule);padding:10px 12px}
+  .stage b{display:block;font-size:22px;color:var(--ledger)}
+  .stage i{font-style:normal;font-size:10px;color:var(--dim);letter-spacing:.1em}
+  table{width:100%;border-collapse:collapse}
+  th{font-size:10px;color:var(--dim);text-align:left;letter-spacing:.12em;padding:6px 8px;border-bottom:1px solid var(--rule)}
+  td{padding:9px 8px;border-bottom:1px solid var(--rule);font-size:12.5px;vertical-align:top}
+  tr:hover td{background:var(--panel)}
+  .num{text-align:right;font-variant-numeric:tabular-nums}
+  .pos{color:var(--ledger)} .neg{color:var(--dead)}
+  .badge{font-size:10px;padding:2px 7px;border:1px solid var(--rule);color:var(--dim);letter-spacing:.06em;white-space:nowrap}
+  .badge.hot{border-color:var(--ledger);color:var(--ledger)}
+  .badge.uc{border-color:var(--flag);color:var(--flag)}
+  .badge.dead{border-color:var(--dead);color:var(--dead)}
+  .score{display:inline-block;min-width:34px;text-align:center;padding:2px 4px;background:var(--panel);border-left:3px solid var(--ledger)}
+  h2{font-size:11px;letter-spacing:.14em;color:var(--dim);margin:28px 0 10px;text-transform:uppercase}
+  .ev{color:var(--dim);font-size:11.5px;padding:4px 0;border-bottom:1px dotted var(--rule)}
+  .ev b{color:var(--ink);font-weight:500}
+  @media(max-width:640px){ .hide-m{display:none} body{padding:14px 8px 50px} }
+</style>
+</head>
+<body>
+<header>
+  <h1>DEALFLOW <span>/ LEDGER</span></h1>
+  <div class="sub">Bristol County MA · wholesale pipeline · generated locally, no fabricated data</div>
+</header>
+<div class="rail" id="rail"></div>
+<table>
+  <thead><tr>
+    <th>#</th><th>PROPERTY</th><th class="hide-m">SIGNALS</th><th>SCORE</th>
+    <th class="num">ARV</th><th class="num hide-m">REPAIRS</th><th class="num">MAO</th>
+    <th class="num">SPREAD</th><th>STAGE</th>
+  </tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+<h2>Event Log</h2>
+<div id="log"></div>
+<script>
+/*DATA*/
+const $ = s => document.querySelector(s);
+const usd = v => v==null ? "—" : "$"+Math.round(v).toLocaleString();
+const stages = ["LEAD","UNDERWRITTEN","OFFER_SENT","UNDER_CONTRACT","ASSIGNED","CLOSED"];
+$("#rail").innerHTML = stages.map(s=>{
+  const n = LEADS.filter(l=>l.state===s).length;
+  return `<div class="stage"><b>${n}</b><i>${s.replace("_"," ")}</i></div>`;
+}).join("");
+$("#rows").innerHTML = LEADS.map(l=>{
+  const cls = l.state==="UNDER_CONTRACT"?"uc":(l.state==="DEAD"?"dead":(l.distress_score>=50?"hot":""));
+  const sp = l.spread;
+  return `<tr>
+    <td>${l.id}</td>
+    <td>${l.address}<br><span style="color:var(--dim);font-size:11px">${l.city} · ${l.sqft||"?"} sf · ${l.beds||"?"}/${l.baths||"?"}</span></td>
+    <td class="hide-m" style="color:var(--dim);font-size:11px">${(l.signals||"").replaceAll(";","<br>")}</td>
+    <td><span class="score">${l.distress_score??"—"}</span></td>
+    <td class="num">${usd(l.arv)}</td>
+    <td class="num hide-m">${usd(l.repairs)}</td>
+    <td class="num">${usd(l.mao)}</td>
+    <td class="num ${sp>0?"pos":sp<0?"neg":""}">${usd(sp)}</td>
+    <td><span class="badge ${cls}">${l.state.replace("_"," ")}${l.assigned_to?" → "+l.assigned_to:""}</span></td>
+  </tr>`;
+}).join("");
+$("#log").innerHTML = EVENTS.map(e=>`<div class="ev"><b>#${e.lead_id}</b> ${e.what} <span style="float:right">${e.ts}</span></div>`).join("");
+</script>
+</body>
+</html>

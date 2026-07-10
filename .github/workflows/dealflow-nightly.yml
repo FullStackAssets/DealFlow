@@ -1,0 +1,57 @@
+name: dealflow-nightly
+
+on:
+  # Cron held until the repo-visibility decision: this job commits fetched
+  # owner data (db + CSVs + dashboard) back to the repo, and the repo is
+  # currently PUBLIC. Re-enable by uncommenting once that's decided.
+  # schedule:
+  #   - cron: "0 9 * * *"   # nightly 9:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dealflow-nightly
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # stdlib only — the runner's system python3 is all we need
+
+      - name: Fetch fresh MassGIS data
+        run: |
+          python3 fetch_massgis.py comps --days=730 "FALL RIVER" "BROCKTON" "TAUNTON" "NEW BEDFORD" > comps_real.csv
+          python3 fetch_massgis.py leads "FALL RIVER" "BROCKTON" "TAUNTON" "NEW BEDFORD" > leads_real.csv
+
+      - name: Ingest
+        run: |
+          python3 dealflow.py ingest leads_real.csv
+          # comps table is rebuilt each night from the fresh fetch (leads dedupe on address; comps don't)
+          python3 -c "import sqlite3; c=sqlite3.connect('dealflow.db'); c.execute('DELETE FROM comps'); c.commit()"
+          python3 dealflow.py comps comps_real.csv
+
+      - name: Sweep inbox
+        run: |
+          shopt -s nullglob
+          for f in inbox/leads_*.csv;  do python3 dealflow.py ingest "$f"; done
+          for f in inbox/buyers_*.csv; do python3 dealflow.py buyers "$f"; done
+
+      - name: Underwrite + dashboard
+        run: |
+          python3 dealflow.py underwrite
+          python3 dealflow.py status
+          python3 dealflow.py dashboard
+
+      - name: Commit state back
+        run: |
+          git config user.name "dealflow-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add dealflow.db out/dashboard.html comps_real.csv leads_real.csv
+          git diff --cached --quiet && { echo "no changes"; exit 0; }
+          git commit -m "nightly: fetch + underwrite $(date -u +%F)"
+          git push
