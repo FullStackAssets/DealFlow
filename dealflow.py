@@ -80,6 +80,9 @@ def db():
                 con.execute(f"ALTER TABLE {table} ADD COLUMN {col} REAL")
             except sqlite3.OperationalError:
                 pass  # column already exists
+    # buyers dedupe on name so the nightly inbox sweep stays idempotent
+    con.execute("DELETE FROM buyers WHERE id NOT IN (SELECT MIN(id) FROM buyers GROUP BY name)")
+    con.execute("CREATE UNIQUE INDEX IF NOT EXISTS buyers_name ON buyers(name)")
     return con
 
 def log(con, lead_id, what):
@@ -127,7 +130,11 @@ def load_buyers(path):
     """CSV: name,contact,cities(semicolon),max_price,min_spread,strategy,proof_of_funds(0/1)"""
     con = db(); n = 0
     for r in csv.DictReader(open(path)):
-        con.execute("INSERT INTO buyers(name,contact,cities,max_price,min_spread,strategy,proof_of_funds) VALUES(?,?,?,?,?,?,?)",
+        con.execute("""INSERT INTO buyers(name,contact,cities,max_price,min_spread,strategy,proof_of_funds)
+                    VALUES(?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET
+                    contact=excluded.contact, cities=excluded.cities, max_price=excluded.max_price,
+                    min_spread=excluded.min_spread, strategy=excluded.strategy,
+                    proof_of_funds=excluded.proof_of_funds""",
                     (r["name"], r["contact"], r["cities"], float(r["max_price"]),
                      float(r.get("min_spread") or 0), r.get("strategy","flip"),
                      int(r.get("proof_of_funds") or 0)))
