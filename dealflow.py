@@ -23,6 +23,7 @@ Usage:
   python3 dealflow.py buyers buyers.csv         # load buyer box list
   python3 dealflow.py assign <lead_id>          # match buyers, gen assignment package
   python3 dealflow.py dashboard                 # write dashboard.html
+  python3 dealflow.py mailer                    # direct-mail CSV for high-score underwritten leads
   python3 dealflow.py status                    # pipeline snapshot
 """
 import csv, json, math, re, sqlite3, sys, textwrap
@@ -328,6 +329,29 @@ def status():
     for r in con.execute("SELECT state, COUNT(*) n, COALESCE(SUM(spread),0) s FROM leads GROUP BY state"):
         print(f"{r['state']:<15} {r['n']:>3}  spread ${r['s']:,.0f}")
 
+def mailer():
+    """Direct-mail export: owner name + mailing address for UNDERWRITTEN leads
+    scoring >= CFG['mailer_min_score'], one row per owner_mail (public assessor
+    data only — outreach list, no enrichment)."""
+    con = db()
+    rows = con.execute("""SELECT owner, owner_mail, address, city, distress_score, mao
+                       FROM leads WHERE state='UNDERWRITTEN' AND distress_score >= ?
+                       ORDER BY distress_score DESC, id""", (CFG["mailer_min_score"],)).fetchall()
+    OUT.mkdir(exist_ok=True)
+    path = OUT / f"mailer_{date.today().strftime('%Y%m%d')}.csv"
+    seen = set(); n = 0
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["owner", "owner_mail", "property_address", "property_city", "distress_score", "mao"])
+        for r in rows:
+            key = (r["owner_mail"] or "").strip().upper()
+            if not key or key in seen:
+                continue
+            seen.add(key); n += 1
+            w.writerow([r["owner"], r["owner_mail"], r["address"], r["city"],
+                        r["distress_score"], r["mao"]])
+    print(f"mailer: {n} owners (score >= {CFG['mailer_min_score']}, deduped from {len(rows)} leads) -> {path}")
+
 def dashboard():
     con = db()
     leads = [dict(r) for r in con.execute("SELECT * FROM leads ORDER BY distress_score DESC")]
@@ -342,7 +366,8 @@ def dashboard():
 if __name__ == "__main__":
     cmds = {"ingest": ingest, "comps": load_comps, "buyers": load_buyers,
             "underwrite": underwrite, "offer": offer, "counter": counter,
-            "contract": contract, "assign": assign, "status": status, "dashboard": dashboard}
+            "contract": contract, "assign": assign, "status": status, "dashboard": dashboard,
+            "mailer": mailer}
     if len(sys.argv) < 2 or sys.argv[1] not in cmds:
         sys.exit(__doc__)
     cmds[sys.argv[1]](*sys.argv[2:])
