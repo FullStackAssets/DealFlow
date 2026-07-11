@@ -23,9 +23,10 @@ Usage:
   python3 dealflow.py buyers buyers.csv         # load buyer box list
   python3 dealflow.py assign <lead_id>          # match buyers, gen assignment package
   python3 dealflow.py dashboard                 # write dashboard.html
+  python3 dealflow.py mailer                    # direct-mail CSV for high-score underwritten leads
   python3 dealflow.py status                    # pipeline snapshot
 """
-import csv, json, re, sqlite3, sys, textwrap
+import csv, json, math, re, sqlite3, sys, textwrap
 from datetime import date
 from pathlib import Path
 
@@ -42,6 +43,8 @@ CFG = {
     "offer_ladder": [0.88, 0.94, 1.00],   # fractions of MAO: anchor, mid, walk-away
     "county": "Bristol County, MA",
     "stale_comp_days": 730,   # matches fetch window; Brockton assessor vintage lags to Dec 2024
+    "arv_radius_mi": 0.75,    # neighborhood comp radius; citywide fallback when <3 inside
+    "mailer_min_score": 50,   # distress cutoff for direct-mail export
 }
 
 DISTRESS_WEIGHTS = {          # signal -> points
@@ -70,6 +73,16 @@ def db():
     CREATE TABLE IF NOT EXISTS events(
       id INTEGER PRIMARY KEY, lead_id INT, what TEXT, ts TEXT DEFAULT CURRENT_TIMESTAMP);
     """)
+    # additive migrations only — the db is committed state, never drop/rebuild
+    for table in ("leads", "comps"):
+        for col in ("lat", "lon"):
+            try:
+                con.execute(f"ALTER TABLE {table} ADD COLUMN {col} REAL")
+            except sqlite3.OperationalError:
+                pass  # column already exists
+    # buyers dedupe on name so the nightly inbox sweep stays idempotent
+    con.execute("DELETE FROM buyers WHERE id NOT IN (SELECT MIN(id) FROM buyers GROUP BY name)")
+    con.execute("CREATE UNIQUE INDEX IF NOT EXISTS buyers_name ON buyers(name)")
     return con
 
 def log(con, lead_id, what):
@@ -77,32 +90,39 @@ def log(con, lead_id, what):
 
 # ---------------- ingest ----------------
 def ingest(path):
-    """CSV columns: address,city,sqft,beds,baths,owner,owner_mail,signals,condition,asking,notes
+    """CSV columns: address,city,sqft,beds,baths,owner,owner_mail,signals,condition,asking,notes[,lat,lon]
        signals = semicolon list, e.g. 'lis_pendens;absentee;vacant'"""
     con = db(); n = 0
     for r in csv.DictReader(open(path)):
         sig = ";".join(s.strip() for s in (r.get("signals") or "").split(";") if s.strip())
         try:
             con.execute("""INSERT INTO leads(address,city,sqft,beds,baths,owner,owner_mail,
-                        signals,condition,asking,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                        signals,condition,asking,notes,lat,lon) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (r["address"].strip(), r["city"].strip(), int(r.get("sqft") or 0),
                          int(r.get("beds") or 0), float(r.get("baths") or 0),
                          r.get("owner",""), r.get("owner_mail",""), sig,
                          (r.get("condition") or "medium").lower(),
-                         float(r["asking"]) if r.get("asking") else None, r.get("notes","")))
+                         float(r["asking"]) if r.get("asking") else None, r.get("notes",""),
+                         float(r["lat"]) if r.get("lat") else None,
+                         float(r["lon"]) if r.get("lon") else None))
             n += 1
         except sqlite3.IntegrityError:
-            pass  # dedupe on address
+            # dedupe on address; backfill coords onto known leads when the re-fetch has them
+            if r.get("lat") and r.get("lon"):
+                con.execute("UPDATE leads SET lat=?, lon=? WHERE address=? AND lat IS NULL",
+                            (float(r["lat"]), float(r["lon"]), r["address"].strip()))
     con.commit()
     print(f"ingested {n} new leads")
 
 def load_comps(path):
-    """CSV: city,address,sale_price,sqft,sale_date(YYYY-MM-DD),condition"""
+    """CSV: city,address,sale_price,sqft,sale_date(YYYY-MM-DD),condition[,lat,lon]"""
     con = db(); n = 0
     for r in csv.DictReader(open(path)):
-        con.execute("INSERT INTO comps(city,address,sale_price,sqft,sale_date,condition) VALUES(?,?,?,?,?,?)",
+        con.execute("INSERT INTO comps(city,address,sale_price,sqft,sale_date,condition,lat,lon) VALUES(?,?,?,?,?,?,?,?)",
                     (r["city"].strip(), r["address"], float(r["sale_price"]),
-                     int(r["sqft"]), r["sale_date"], (r.get("condition") or "renovated").lower()))
+                     int(r["sqft"]), r["sale_date"], (r.get("condition") or "renovated").lower(),
+                     float(r["lat"]) if r.get("lat") else None,
+                     float(r["lon"]) if r.get("lon") else None))
         n += 1
     con.commit(); print(f"loaded {n} comps")
 
@@ -110,7 +130,11 @@ def load_buyers(path):
     """CSV: name,contact,cities(semicolon),max_price,min_spread,strategy,proof_of_funds(0/1)"""
     con = db(); n = 0
     for r in csv.DictReader(open(path)):
-        con.execute("INSERT INTO buyers(name,contact,cities,max_price,min_spread,strategy,proof_of_funds) VALUES(?,?,?,?,?,?,?)",
+        con.execute("""INSERT INTO buyers(name,contact,cities,max_price,min_spread,strategy,proof_of_funds)
+                    VALUES(?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET
+                    contact=excluded.contact, cities=excluded.cities, max_price=excluded.max_price,
+                    min_spread=excluded.min_spread, strategy=excluded.strategy,
+                    proof_of_funds=excluded.proof_of_funds""",
                     (r["name"], r["contact"], r["cities"], float(r["max_price"]),
                      float(r.get("min_spread") or 0), r.get("strategy","flip"),
                      int(r.get("proof_of_funds") or 0)))
@@ -118,34 +142,53 @@ def load_buyers(path):
     con.commit(); print(f"loaded {n} buyers")
 
 # ---------------- underwriting ----------------
+def haversine_mi(lat1, lon1, lat2, lon2):
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    a = math.sin(dp/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
+    return 3958.8 * 2 * math.asin(math.sqrt(a))
+
 def arv_for(con, lead):
-    """Median $/sqft of renovated comps in same city, last N days. Returns (arv, comp_count)."""
+    """Median $/sqft of renovated comps, last N days. Prefers comps within
+    CFG['arv_radius_mi'] of the lead when both sides have coordinates; falls back
+    to city-wide when <3 in radius. Returns (arv, comp_count, mode) — arv None
+    when even city-wide has <3 usable comps (never value on thin data)."""
     cutoff = date.today().toordinal() - CFG["stale_comp_days"]
-    rows = con.execute("SELECT sale_price, sqft, sale_date FROM comps WHERE city=? AND condition='renovated' AND sqft>0",
+    rows = con.execute("SELECT sale_price, sqft, sale_date, lat, lon FROM comps WHERE city=? AND condition='renovated' AND sqft>0",
                        (lead["city"],)).fetchall()
-    ppsf = []
+    citywide, nearby = [], []
     for c in rows:
         try:
             y, m, d = map(int, c["sale_date"].split("-"))
-            if date(y, m, d).toordinal() >= cutoff:
-                ppsf.append(c["sale_price"] / c["sqft"])
+            if date(y, m, d).toordinal() < cutoff:
+                continue
+            ppsf = c["sale_price"] / c["sqft"]
         except (ValueError, ZeroDivisionError):
             continue
+        citywide.append(ppsf)
+        if (lead["lat"] is not None and lead["lon"] is not None
+                and c["lat"] is not None and c["lon"] is not None
+                and haversine_mi(lead["lat"], lead["lon"], c["lat"], c["lon"]) <= CFG["arv_radius_mi"]):
+            nearby.append(ppsf)
+    if len(nearby) >= 3:
+        ppsf, mode = nearby, f"radius<={CFG['arv_radius_mi']}mi"
+    else:
+        ppsf, mode = citywide, "citywide"
     if len(ppsf) < 3 or not lead["sqft"]:
-        return None, len(ppsf)
+        return None, len(ppsf), mode
     ppsf.sort()
     med = ppsf[len(ppsf)//2] if len(ppsf) % 2 else (ppsf[len(ppsf)//2 - 1] + ppsf[len(ppsf)//2]) / 2
-    return round(med * lead["sqft"], -3), len(ppsf)
+    return round(med * lead["sqft"], -3), len(ppsf), mode
 
 def underwrite():
     con = db()
     leads = con.execute("SELECT * FROM leads WHERE state='LEAD'").fetchall()
     for L in leads:
         score = sum(DISTRESS_WEIGHTS.get(s, 0) for s in (L["signals"] or "").split(";"))
-        arv, ncomps = arv_for(con, L)
+        arv, ncomps, mode = arv_for(con, L)
         if arv is None:
             con.execute("UPDATE leads SET distress_score=? WHERE id=?", (score, L["id"]))
-            log(con, L["id"], f"underwrite blocked: only {ncomps} usable comps in {L['city']} — load more")
+            log(con, L["id"], f"underwrite blocked: only {ncomps} usable comps ({mode}) in {L['city']} — load more")
             continue
         repairs = CFG["repair_psf"].get(L["condition"], 55) * (L["sqft"] or 0)
         mao = arv * CFG["mao_pct"] - repairs - CFG["assignment_fee_target"] - arv * CFG["closing_cost_pct"]
@@ -154,7 +197,7 @@ def underwrite():
         con.execute("""UPDATE leads SET state='UNDERWRITTEN', distress_score=?, arv=?,
                     repairs=?, mao=?, spread=? WHERE id=?""",
                     (score, arv, repairs, mao, spread, L["id"]))
-        log(con, L["id"], f"underwritten: ARV {arv:,.0f} ({ncomps} comps), repairs {repairs:,.0f}, MAO {mao:,.0f}")
+        log(con, L["id"], f"underwritten: ARV {arv:,.0f} ({ncomps} comps, {mode}), repairs {repairs:,.0f}, MAO {mao:,.0f}")
     con.commit()
     ranked = con.execute("""SELECT id,address,city,distress_score,arv,mao,asking,spread FROM leads
                          WHERE state='UNDERWRITTEN' ORDER BY distress_score DESC, spread DESC""").fetchall()
@@ -293,6 +336,29 @@ def status():
     for r in con.execute("SELECT state, COUNT(*) n, COALESCE(SUM(spread),0) s FROM leads GROUP BY state"):
         print(f"{r['state']:<15} {r['n']:>3}  spread ${r['s']:,.0f}")
 
+def mailer():
+    """Direct-mail export: owner name + mailing address for UNDERWRITTEN leads
+    scoring >= CFG['mailer_min_score'], one row per owner_mail (public assessor
+    data only — outreach list, no enrichment)."""
+    con = db()
+    rows = con.execute("""SELECT owner, owner_mail, address, city, distress_score, mao
+                       FROM leads WHERE state='UNDERWRITTEN' AND distress_score >= ?
+                       ORDER BY distress_score DESC, id""", (CFG["mailer_min_score"],)).fetchall()
+    OUT.mkdir(exist_ok=True)
+    path = OUT / f"mailer_{date.today().strftime('%Y%m%d')}.csv"
+    seen = set(); n = 0
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["owner", "owner_mail", "property_address", "property_city", "distress_score", "mao"])
+        for r in rows:
+            key = (r["owner_mail"] or "").strip().upper()
+            if not key or key in seen:
+                continue
+            seen.add(key); n += 1
+            w.writerow([r["owner"], r["owner_mail"], r["address"], r["city"],
+                        r["distress_score"], r["mao"]])
+    print(f"mailer: {n} owners (score >= {CFG['mailer_min_score']}, deduped from {len(rows)} leads) -> {path}")
+
 def dashboard():
     con = db()
     leads = [dict(r) for r in con.execute("SELECT * FROM leads ORDER BY distress_score DESC")]
@@ -307,7 +373,8 @@ def dashboard():
 if __name__ == "__main__":
     cmds = {"ingest": ingest, "comps": load_comps, "buyers": load_buyers,
             "underwrite": underwrite, "offer": offer, "counter": counter,
-            "contract": contract, "assign": assign, "status": status, "dashboard": dashboard}
+            "contract": contract, "assign": assign, "status": status, "dashboard": dashboard,
+            "mailer": mailer}
     if len(sys.argv) < 2 or sys.argv[1] not in cmds:
         sys.exit(__doc__)
     cmds[sys.argv[1]](*sys.argv[2:])

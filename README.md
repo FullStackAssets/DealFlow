@@ -24,6 +24,7 @@ python3 dealflow.py counter <id> <their_number>
 python3 dealflow.py contract <id> <price>
 python3 dealflow.py assign <id>
 python3 dealflow.py dashboard      # -> out/dashboard.html
+python3 dealflow.py mailer         # -> out/mailer_YYYYMMDD.csv (score>=50, deduped by owner mail)
 python3 dealflow.py status
 ```
 

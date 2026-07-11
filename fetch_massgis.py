@@ -23,15 +23,24 @@ FIELDS = ("SITE_ADDR,CITY,LS_PRICE,LS_DATE,BLD_AREA,YEAR_BUILT,OWNER1,"
           "OWN_ADDR,OWN_CITY,OWN_STATE,TOTAL_VAL,STYLE,NUM_ROOMS,USE_CODE,RES_AREA")
 
 def query(where, offset=0):
+    # returnCentroid + outSR=4326 (verified live 2026-07-10): parcel centroid as
+    # WGS84 lat/lon, much cheaper than returnGeometry=true polygon rings.
     params = urllib.parse.urlencode({
         "where": where, "outFields": FIELDS, "returnGeometry": "false",
+        "returnCentroid": "true", "outSR": 4326,
         "orderByFields": "LS_DATE DESC", "resultOffset": offset,
         "resultRecordCount": 2000, "f": "json"})
     with urllib.request.urlopen(f"{BASE}?{params}", timeout=90) as r:
         d = json.load(r)
     if "error" in d:
         sys.exit(f"API error: {d['error']}")
-    return [f["attributes"] for f in d.get("features", [])], d.get("exceededTransferLimit", False)
+    feats = []
+    for f in d.get("features", []):
+        a = f["attributes"]
+        c = f.get("centroid") or {}
+        a["_LAT"], a["_LON"] = c.get("y"), c.get("x")
+        feats.append(a)
+    return feats, d.get("exceededTransferLimit", False)
 
 def fetch_all(where):
     out, offset = [], 0
@@ -52,19 +61,20 @@ def iso(yyyymmdd):
 def comps(cities, days=365):
     cutoff = (date.today() - timedelta(days=days)).strftime("%Y%m%d")
     w = csv.writer(sys.stdout)
-    w.writerow(["city", "address", "sale_price", "sqft", "sale_date", "condition"])
+    w.writerow(["city", "address", "sale_price", "sqft", "sale_date", "condition", "lat", "lon"])
     for city in cities:
         where = (f"TOWN_ID={TOWN_ID[city]} AND USE_CODE LIKE '101%' AND LS_PRICE>150000 "
                  f"AND LS_DATE>='{cutoff}' AND (BLD_AREA>0 OR RES_AREA>0)")
         for a in fetch_all(where):
             w.writerow([city.title(), a["SITE_ADDR"], a["LS_PRICE"],
-                        sqft(a), iso(a["LS_DATE"]), "renovated"])
+                        sqft(a), iso(a["LS_DATE"]), "renovated",
+                        a["_LAT"] or "", a["_LON"] or ""])
 
 def leads(cities):
     held_cutoff = (date.today() - timedelta(days=15 * 365)).strftime("%Y%m%d")
     w = csv.writer(sys.stdout)
     w.writerow(["address","city","sqft","beds","baths","owner","owner_mail",
-                "signals","condition","asking","notes"])
+                "signals","condition","asking","notes","lat","lon"])
     for city in cities:
         where = (f"TOWN_ID={TOWN_ID[city]} AND USE_CODE LIKE '101%' AND (BLD_AREA>0 OR RES_AREA>0) "
                  f"AND YEAR_BUILT>0 AND YEAR_BUILT<1960 "
@@ -82,7 +92,8 @@ def leads(cities):
             notes = (f"assessed {a.get('TOTAL_VAL')}; built {a.get('YEAR_BUILT')}; "
                      f"{a.get('STYLE','')}; last sale {iso(a.get('LS_DATE'))} @ {a.get('LS_PRICE')}")
             w.writerow([a["SITE_ADDR"], city.title(), sqft(a), "", "",
-                        a.get("OWNER1",""), mail, ";".join(sig), "medium", "", notes])
+                        a.get("OWNER1",""), mail, ";".join(sig), "medium", "", notes,
+                        a["_LAT"] or "", a["_LON"] or ""])
 
 if __name__ == "__main__":
     if len(sys.argv) < 3 or sys.argv[1] not in ("comps", "leads"):
