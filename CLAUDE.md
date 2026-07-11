@@ -7,7 +7,17 @@ negotiation math, generates assignment paperwork, matches buyers. Owner: Nic —
 founder, no local dev environment; everything runs via GitHub Actions and cloud pipelines.
 
 **Current state: WORKING.** 854 real leads underwritten across 4 cities against 1,293
-real comps, zero blocked, as of 2026-07-08. Don't refactor what runs; extend it.
+real comps, zero blocked, as of 2026-07-10. Neighborhood-level ARV (0.75mi comp radius
+via parcel centroids) and direct-mail export shipped; lat/lon populates on the next
+nightly fetch — until then everything prices citywide, by design. Don't refactor what
+runs; extend it.
+
+**Data hold (2026-07-10):** the repo is PUBLIC, so `dealflow.db`, `leads_real.csv`,
+`comps_real.csv`, and `out/dashboard.html` (real owner names + mailing addresses with
+distress annotations) are NOT committed yet, and the nightly cron is commented out in
+the workflow. Once Nic makes the repo private (or explicitly okays public data): commit
+those four files, uncomment the cron, and the committed-db state-store design in the
+file map below applies as written. Until then, regenerate locally via the smoke test.
 
 ## File map
 - `dealflow.py` — entire engine. Single file, **stdlib only** (deliberate; keep it that way).
@@ -37,6 +47,8 @@ Endpoint: `https://services1.arcgis.com/hGdibHYSPO59RG1h/arcgis/rest/services/Ma
   comp fetch `--days=730` and `CFG["stale_comp_days"]=730`. Fall River is current to Nov 2025.
 - `LS_DATE` is a YYYYMMDD **string**. Max 2000 records/page; fetcher paginates via
   `exceededTransferLimit` + `resultOffset`.
+- Parcel coords: `returnCentroid=true&outSR=4326` gives a WGS84 centroid per feature
+  (verified live 2026-07-10) — no need to pull polygon rings via `returnGeometry`.
 - Lead signal proxies from assessor data: absentee (owner city/state mismatch),
   high_equity (held 15+ yrs), probate (nominal ≤$100 transfer — really estate/trust deed,
   verify at registry), vacant (out-of-state owner — verify by drive-by).
@@ -46,13 +58,16 @@ Endpoint: `https://services1.arcgis.com/hGdibHYSPO59RG1h/arcgis/rest/services/Ma
    has no clean API (ASP.NET postback site). Current path: weekly manual export →
    `inbox/leads_*.csv`. A scraper is possible but fragile; if attempted, make failure
    non-fatal to the nightly run.
-2. **Neighborhood-level ARV** — comps are city-wide median $/sqft. Parcel records have
-   geometry available (`returnGeometry=true`); a radius or ZIP-cluster comp filter would
-   tighten ARV materially. ZIP is null in some towns — use geometry, not ZIP.
-3. **Brockton buyer coverage** — buyers table has Brockton entries only in the sample CSV;
+2. **Brockton buyer coverage** — buyers table has Brockton entries only in the sample CSV;
    real buyer list is Nic's, arrives via `inbox/buyers_*.csv`.
-4. **GitHub Pages** on `/out` for a phone-viewable dashboard URL.
-5. Direct-mail export (CSV of owner mailing addresses for the 75-score cohort).
+3. **GitHub Pages** on `/out` for a phone-viewable dashboard URL.
+
+Done 2026-07-10: neighborhood-level ARV (`arv_for()` prefers renovated comps within
+`CFG["arv_radius_mi"]`=0.75mi via haversine on parcel centroids, city-wide fallback
+when <3 in radius, mode logged per lead, <3-comps refusal intact in both modes;
+lat/lon on leads+comps via additive migration) and direct-mail export
+(`dealflow.py mailer` → `out/mailer_YYYYMMDD.csv`, score ≥ `CFG["mailer_min_score"]`=50,
+deduped on owner_mail). Buyers now upsert on name so the nightly sweep is idempotent.
 
 ## Non-negotiables
 - **No AI slop**: never fabricate data. Underwriting refuses to value a lead with <3
@@ -75,7 +90,7 @@ python3 fetch_massgis.py comps --days=730 "FALL RIVER" "BROCKTON" "TAUNTON" "NEW
 python3 fetch_massgis.py leads "FALL RIVER" "BROCKTON" "TAUNTON" "NEW BEDFORD" > leads_real.csv
 python3 dealflow.py ingest leads_real.csv | comps <csv> | buyers <csv>
 python3 dealflow.py underwrite | offer <id> | counter <id> <amt> | contract <id> <price> | assign <id>
-python3 dealflow.py dashboard | status
+python3 dealflow.py dashboard | mailer | status
 ```
 Smoke test after any change: `rm -f dealflow.db && python3 dealflow.py ingest leads_real.csv
 && python3 dealflow.py comps comps_real.csv && python3 dealflow.py underwrite && python3 dealflow.py status`
