@@ -40,7 +40,7 @@ comes from MassLandRecords manual export -> `inbox/leads_*.csv`.
 Ready-made workflow at `.github/workflows/dealflow-nightly.yml`: nightly cron +
 manual trigger from the GitHub iOS app. Fetches MassGIS fresh, ingests anything
 in `inbox/`, underwrites, commits db + dashboard back to the repo.
-Drop new lead CSVs into `inbox/` from your phone (Working Copy app), dashboard commits back — view it via GitHub Pages or Vercel static deploy. Lead CSVs can come from a Cloudflare Worker email-ingestion pipe (same pattern as HostGraph's invoice intake) if you subscribe to a list provider that emails exports.
+Drop new lead CSVs into `inbox/` from your phone (Working Copy app), dashboard commits back — view it through GitHub Pages or another independently verified static host. Lead CSVs can come from a Cloudflare Worker email-ingestion pipe (same pattern as HostGraph's invoice intake) if you subscribe to a list provider that emails exports.
 
 ## Config
 All knobs at the top of `dealflow.py` in `CFG`: fee target/floor, MAO %, repair $/sqft tiers, offer ladder fractions.
