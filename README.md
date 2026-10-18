@@ -3,6 +3,15 @@
 Single-file, stdlib-only Python engine. SQLite state machine:
 `LEAD → UNDERWRITTEN → OFFER_SENT → UNDER_CONTRACT → ASSIGNED → CLOSED`
 
+## Install
+
+```bash
+pip install git+https://github.com/FullStackAssets/DealFlow.git
+dealflow status
+```
+
+Or run with no install at all: `python3 dealflow.py status`. Zero dependencies either way — standard library only.
+
 ## What's automated vs what's you
 
 | Stage | Automated | You |
