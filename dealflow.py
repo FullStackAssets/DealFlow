@@ -370,11 +370,16 @@ def dashboard():
     print(f"dashboard -> {OUT/'dashboard.html'}")
 
 # ---------------- cli ----------------
-if __name__ == "__main__":
+def main(argv=None):
     cmds = {"ingest": ingest, "comps": load_comps, "buyers": load_buyers,
             "underwrite": underwrite, "offer": offer, "counter": counter,
             "contract": contract, "assign": assign, "status": status, "dashboard": dashboard,
             "mailer": mailer}
-    if len(sys.argv) < 2 or sys.argv[1] not in cmds:
+    args = sys.argv[1:] if argv is None else argv
+    if not args or args[0] not in cmds:
         sys.exit(__doc__)
-    cmds[sys.argv[1]](*sys.argv[2:])
+    cmds[args[0]](*args[1:])
+
+
+if __name__ == "__main__":
+    main()
